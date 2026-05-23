@@ -67,6 +67,19 @@
     <Compile Include="Form1.Designer.cs">
       <DependentUpon>Form1.cs</DependentUpon>
     </Compile>
+    <Compile Include="Game\BlockBreaking.cs" />
+    <Compile Include="Game\CraftingRecipe.cs" />
+    <Compile Include="Game\DayNightCycle.cs" />
+    <Compile Include="Game\Furnace.cs" />
+    <Compile Include="Game\Inventory.cs" />
+    <Compile Include="Game\ItemType.cs" />
+    <Compile Include="Game\Mob.cs" />
+    <Compile Include="Game\Player.cs" />
+    <Compile Include="Game\SaveSystem.cs" />
+    <Compile Include="Game\TileType.cs" />
+    <Compile Include="MainMenuForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <EmbeddedResource Include="Form1.resx">

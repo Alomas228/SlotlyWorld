@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Text;
@@ -23,7 +24,7 @@ namespace SlotlyWorld
         private bool isInventoryVisible = false;
         private bool isDay = true;
         private float dayNightCycleTimer = 0f;
-        private const float dayNightCycleDuration = 10f; // 10 минут полный цикл (5 день + 5 ночь)
+        private const float dayNightCycleDuration = 120f; // секунд на полный цикл день/ночь
         private DayNightCycle currentCycle = DayNightCycle.Day;
         private float currentLightLevel = 1.0f; // 1.0 - полный день, 0.0 - полная ночь
         private int miniMapSize = 150; // Уменьшаем размер для производительности
@@ -49,14 +50,6 @@ namespace SlotlyWorld
         private bool[,] exploredTiles;
 
 
-        public enum DayNightCycle
-        {
-            Day,
-            TransitionToNight,
-            Night,
-            TransitionToDay
-        }
-
         private TileType[,] world; // Двумерный массив мира
         private Random random = new Random();
         private Player player = new Player();
@@ -77,84 +70,20 @@ namespace SlotlyWorld
         private float fractionalX = 0; // Дробная часть смещения по X
         private float fractionalY = 0; // Дробная часть смещения по Y
 
-        public class BlockBreaking
-        {
-            public int X { get; set; }
-            public int Y { get; set; }
-            public float Progress { get; set; } // от 0.0 до 1.0
-            public float TotalTime { get; set; } // общее время для ломания
-            public bool IsBreaking { get; set; } = false;
-        }
+        // Реальный deltaTime между кадрами в секундах.
+        private Stopwatch frameStopwatch = new Stopwatch();
 
+        // Persistent-буфер для рендера, чтобы не аллоцировать Bitmap каждый кадр.
+        private Bitmap worldBitmap;
+        private Graphics worldGraphics;
 
-        // Перечисления
-        public enum TileType
-        {
-            Water,  // Вода (синий)
-            Grass,  // Трава (зелёный)
-            Tree,   // Дерево (тёмно-зелёный)
-            Stone,  // Камень (серый)
-            CoalOre, // Угольная руда
-            IronOre, // Железная руда
-            GoldOre, // Золотая руда
-            Plank,   // Доски
-            Furnace, // Печь
-            Floor // Пол
+        // Кэшированные ресурсы HUD — иначе создаются каждый кадр.
+        private readonly Font hudFont = new Font("Arial", 12, FontStyle.Bold);
+        private readonly Brush hudTextBrush = new SolidBrush(Color.White);
+        private readonly Brush hudBgBrush = new SolidBrush(Color.FromArgb(128, 0, 0, 0));
 
-        }
-
-        public enum ItemType
-        {
-            Stone,
-            Wood,
-            Plank,    // Добавлено: доски
-            Stick,    // Добавлено: палки
-            WoodPickaxe, // Добавлено: деревянная кирка
-            WoodSword,   // Добавлено: деревянный меч
-            StonePickaxe, // Добавлено: каменная кирка
-            StoneSword,   // Добавлено: каменный меч
-            Furnace,      // Добавлено: печь
-            Coal,         // Уголь
-            IronOre,    // Добавлено: железная руда
-            GoldOre,    // Добавлено: золотая руда
-            IronIngot,  // Железный слиток
-            GoldIngot,  // Золотой слиток
-            IronPickaxe,  // Железная кирка
-            IronSword,    // Железный меч
-            Torch,   // Факел
-            Floor // Пол
-        }
-
-
-
-
-        // Вложенные классы
-        public class Inventory
-        {
-            public Dictionary<ItemType, int> Items { get; private set; }
-
-            public Inventory()
-            {
-                Items = new Dictionary<ItemType, int>();
-                foreach (ItemType type in Enum.GetValues(typeof(ItemType)))
-                {
-                    Items[type] = 0;
-                }
-            }
-
-            public void AddItem(ItemType type, int count = 1)
-            {
-                Items[type] += count;
-            }
-
-            public void RemoveItem(ItemType type, int count = 1)
-            {
-                if (Items[type] >= count)
-                {
-                    Items[type] -= count;
-                }
-            }
-        }
+        // true — загрузить из сохранения, false — начать новую игру.
+        private readonly bool loadExisting;
 
         private void InitializeMiniMap()
         {
@@ -328,22 +257,13 @@ namespace SlotlyWorld
                 return;
             }
 
-            currentBlockBreaking.Progress += deltaTime * 14 / currentBlockBreaking.TotalTime;
+            currentBlockBreaking.Progress += deltaTime / currentBlockBreaking.TotalTime;
 
             if (currentBlockBreaking.Progress >= 1.0f)
             {
                 BreakBlock(currentBlockBreaking.X, currentBlockBreaking.Y);
                 currentBlockBreaking.IsBreaking = false;
             }
-        }
-
-        public class Furnace
-        {
-            public int X { get; set; }
-            public int Y { get; set; }
-            public bool IsActive { get; set; }
-            public Dictionary<ItemType, int> InputItems { get; set; } = new Dictionary<ItemType, int>();
-
         }
 
         private List<Furnace> furnaces = new List<Furnace>();
@@ -399,289 +319,49 @@ namespace SlotlyWorld
 
             if (miniMapCache == null) GenerateMiniMapCache();
 
-            Bitmap currentFrame = new Bitmap(miniMapCache); // Копируем кэш
-
-            using (Graphics g = Graphics.FromImage(currentFrame))
+            if (miniMapFrame == null)
             {
-                // Рисуем видимую область
-                Rectangle visibleArea = new Rectangle(
-                    (int)(viewOffsetX * miniMapScale),
-                    (int)(viewOffsetY * miniMapScale),
-                    (int)(viewWidth * miniMapScale),
-                    (int)(viewHeight * miniMapScale));
-
-                using (Pen pen = new Pen(Color.Yellow, 1)) // Уменьшаем толщину линии
-                {
-                    g.DrawRectangle(pen, visibleArea);
-                }
-
-                // Рисуем игрока (просто крестик вместо круга для производительности)
-                int playerX = (int)(player.X / tileSize * miniMapScale);
-                int playerY = (int)(player.Y / tileSize * miniMapScale);
-                int crossSize = 3;
-
-                g.DrawLine(Pens.Red, playerX - crossSize, playerY, playerX + crossSize, playerY);
-                g.DrawLine(Pens.Red, playerX, playerY - crossSize, playerX, playerY + crossSize);
-
-                lastPlayerRect = new Rectangle(playerX - crossSize, playerY - crossSize,
-                                             crossSize * 2, crossSize * 2);
-                lastVisibleArea = visibleArea;
+                miniMapFrame = new Bitmap(miniMapSize, miniMapSize);
+                miniMapFrameGraphics = Graphics.FromImage(miniMapFrame);
+                miniMapBox.Image = miniMapFrame;
             }
 
-            miniMapBox.Image?.Dispose(); // Освобождаем предыдущее изображение
-            miniMapBox.Image = currentFrame;
+            miniMapFrameGraphics.DrawImageUnscaled(miniMapCache, 0, 0);
+
+            Rectangle visibleArea = new Rectangle(
+                (int)(viewOffsetX * miniMapScale),
+                (int)(viewOffsetY * miniMapScale),
+                (int)(viewWidth * miniMapScale),
+                (int)(viewHeight * miniMapScale));
+
+            miniMapFrameGraphics.DrawRectangle(Pens.Yellow, visibleArea);
+
+            int playerX = (int)(player.X / tileSize * miniMapScale);
+            int playerY = (int)(player.Y / tileSize * miniMapScale);
+            int crossSize = 3;
+
+            miniMapFrameGraphics.DrawLine(Pens.Red, playerX - crossSize, playerY, playerX + crossSize, playerY);
+            miniMapFrameGraphics.DrawLine(Pens.Red, playerX, playerY - crossSize, playerX, playerY + crossSize);
+
+            lastPlayerRect = new Rectangle(playerX - crossSize, playerY - crossSize,
+                                         crossSize * 2, crossSize * 2);
+            lastVisibleArea = visibleArea;
+
+            miniMapBox.Invalidate();
             miniMapNeedsUpdate = false;
         }
 
-        public class CraftingRecipe
-        {
-            public string Name { get; set; } // Название рецепта
-            public Dictionary<ItemType, int> RequiredItems { get; set; } // Необходимые предметы
-            public ItemType ResultItem { get; set; } // Результат крафта
-            public int ResultCount { get; set; } // Количество результата
-            public bool IsSmelting { get; set; } // Флаг для типа рецепта
-
-            public CraftingRecipe(string name, Dictionary<ItemType, int> requiredItems,
-                                 ItemType resultItem, int resultCount = 1)
-            {
-                Name = name;
-                RequiredItems = requiredItems;
-                ResultItem = resultItem;
-                ResultCount = resultCount;
-            }
-        }
-
-        public class Mob
-        {
-
-            public float X { get; set; }
-            public float Y { get; set; }
-            public int Size { get; set; } = 16;
-            public float Speed { get; set; }
-            public int Health { get; set; }
-            public int MaxHealth { get; set; }
-            public int Damage { get; set; }
-            public bool IsActive { get; set; } = false;
-            public float AttackCooldown { get; set; } = 0f;
-            public float AttackCooldownMax { get; set; } = 0.05f;
-            public bool CanAttack => AttackCooldown <= 0f;
-
-            public Mob(int health, int damage, float speed)
-            {
-                MaxHealth = health;
-                Health = health;
-                Damage = damage;
-                Speed = speed;
-            }
-
-            public void Draw(Graphics g, Color color)
-            {
-                // Рисуем моба в центре его координат с заданным цветом
-                g.FillEllipse(new SolidBrush(color), -Size / 2, -Size / 2, Size, Size);
-            }
-
-
-
-
-            public void Update(Player player, TileType[,] world, int tileSize, float deltaTime)
-            {
-                if (!IsActive) return;
-
-                // Обновляем кулдаун атаки
-                if (AttackCooldown > 0)
-                {
-                    AttackCooldown -= deltaTime;
-                }
-
-                // Рассчитываем направление к игроку
-                float dx = player.X - X;
-                float dy = player.Y - Y;
-                float distance = (float)Math.Sqrt(dx * dx + dy * dy);
-
-                // Если игрок в радиусе 150 пикселей
-                if (distance <= 150)
-                {
-                    // Нормализуем вектор направления
-                    if (distance > 0)
-                    {
-                        dx /= distance;
-                        dy /= distance;
-                    }
-
-                    // Двигаемся к игроку
-                    float newX = X + dx * Speed;
-                    float newY = Y + dy * Speed;
-
-                    // Проверяем коллизии
-                    if (CanMove(newX - X, newY - Y, world, tileSize))
-                    {
-                        X = newX;
-                        Y = newY;
-                    }
-                }
-            }
-
-            public bool CanMove(float dx, float dy, TileType[,] world, int tileSize)
-            {
-                float newX = X + dx;
-                float newY = Y + dy;
-
-                if (newX < 0 || newY < 0 ||
-                    newX + Size > world.GetLength(0) * tileSize ||
-                    newY + Size > world.GetLength(1) * tileSize)
-                {
-                    return false;
-                }
-
-                int tileX1 = (int)(newX / tileSize);
-                int tileY1 = (int)(newY / tileSize);
-                int tileX2 = (int)((newX + Size - 1) / tileSize);
-                int tileY2 = (int)((newY + Size - 1) / tileSize);
-
-                for (int x = tileX1; x <= tileX2; x++)
-                {
-                    for (int y = tileY1; y <= tileY2; y++)
-                    {
-                        if (x >= 0 && y >= 0 && x < world.GetLength(0) && y < world.GetLength(1))
-                        {
-                            TileType tile = world[x, y];
-                            if (tile == TileType.Water || tile == TileType.Stone ||
-                                tile == TileType.Tree || tile == TileType.CoalOre ||
-                                tile == TileType.IronOre || tile == TileType.GoldOre ||
-                                tile == TileType.Plank) // Убираем проверку на Floor
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                }
-
-                return true;
-            }
-        }
-        public class Player
-        {
-            public float X { get; set; } = 0f;
-            public float Y { get; set; } = 0f;
-            public int Size { get; set; } = 14;
-            public float Speed { get; set; } = 2.5f;
-            public Inventory Inventory { get; private set; } = new Inventory();
-            private HashSet<Keys> activeDirections = new HashSet<Keys>();
-
-            public int Health { get; set; } = 100;
-            public int MaxHealth { get; set; } = 100;
-            public int Armor { get; set; } = 0;
-            public int MaxArmor { get; set; } = 100;
-
-            public bool HasTorch { get; set; } = false;
-
-            public ItemType? CurrentTool { get; set; } = null;
-
-
-
-            public void Draw(Graphics g)
-            {
-                g.FillEllipse(Brushes.Blue, (int)Math.Round(X), (int)Math.Round(Y), Size, Size);
-            }
-
-            public bool CanMove(float dx, float dy, TileType[,] world, int tileSize)
-            {
-                float newX = X + dx;
-                float newY = Y + dy;
-
-                if (newX < 0 || newY < 0 ||
-                    newX + Size > world.GetLength(0) * tileSize ||
-                    newY + Size > world.GetLength(1) * tileSize)
-                {
-                    return false;
-                }
-
-                int tileX1 = (int)(newX / tileSize);
-                int tileY1 = (int)(newY / tileSize);
-                int tileX2 = (int)((newX + Size - 1) / tileSize);
-                int tileY2 = (int)((newY + Size - 1) / tileSize);
-
-                for (int x = tileX1; x <= tileX2; x++)
-                {
-                    for (int y = tileY1; y <= tileY2; y++)
-                    {
-                        if (x >= 0 && y >= 0 && x < world.GetLength(0) && y < world.GetLength(1))
-                        {
-                            TileType tile = world[x, y];
-                            if (tile == TileType.Water || tile == TileType.Stone ||
-                                tile == TileType.Tree || tile == TileType.CoalOre ||
-                                tile == TileType.IronOre || tile == TileType.GoldOre ||
-                                tile == TileType.Plank)
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                }
-
-                return true;
-            }
-
-            public void SetDirection(Keys key, bool isActive)
-            {
-                if (isActive)
-                    activeDirections.Add(key);
-                else
-                    activeDirections.Remove(key);
-            }
-
-            public void CalculateMovement(out float dx, out float dy)
-            {
-                dx = 0;
-                dy = 0;
-                float speed = Speed;
-
-                foreach (var key in activeDirections)
-                {
-                    switch (key)
-                    {
-                        case Keys.W: dy -= speed; break;
-                        case Keys.S: dy += speed; break;
-                        case Keys.A: dx -= speed; break;
-                        case Keys.D: dx += speed; break;
-                    }
-                }
-
-                if (dx != 0 && dy != 0)
-                {
-                    float factor = 0.7071f;
-                    dx *= factor;
-                    dy *= factor;
-                }
-            }
-
-            public void ApplyDamage(int damage)
-            {
-                if (this.Armor > 0)
-                {
-                    int armorDamage = Math.Min(damage, this.Armor);
-                    this.Armor -= armorDamage;
-                    damage -= armorDamage;
-                }
-
-                if (damage > 0)
-                {
-                    this.Health = Math.Max(0, this.Health - damage);
-                }
-
-                if (this.Health <= 0)
-                {
-                    // Handle player death
-                }
-            }
-
-        }
+        private Bitmap miniMapFrame;
+        private Graphics miniMapFrameGraphics;
 
         // Инициализация формы
 
         // Конструктор формы
-        public Form1()
+        public Form1() : this(false) { }
+
+        public Form1(bool loadExisting)
         {
+            this.loadExisting = loadExisting;
             InitializeComponent();
             this.KeyPreview = true;
             picWorld.MouseDown += picWorld_MouseDown;
@@ -717,12 +397,6 @@ namespace SlotlyWorld
             this.Resize += Form1_Resize;
 
             UpdateInventoryDisplay();
-
-
-
-            InitializeHealthDisplay();
-            this.Resize += Form1_Resize; // Добавляем обработчик ресайза
-
 
             // Инициализация панели крафта
             this.craftingPanel = new System.Windows.Forms.Panel();
@@ -769,8 +443,9 @@ namespace SlotlyWorld
             this.KeyUp += OnKeyUp;
 
             gameTimer = new Timer();
-            gameTimer.Interval = 1; // Скорость обновления FPS
+            gameTimer.Interval = 16; // ~60 FPS
             gameTimer.Tick += GameUpdate;
+            frameStopwatch.Start();
             gameTimer.Start();
             InitializeMiniMap();
         }
@@ -1096,6 +771,33 @@ namespace SlotlyWorld
             picWorld.Dock = DockStyle.Fill;
             viewWidth = picWorld.Width / tileSize;
             viewHeight = picWorld.Height / tileSize;
+
+            if (loadExisting && SaveSystem.Exists())
+            {
+                try
+                {
+                    LoadGame();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        "Не удалось загрузить сохранение: " + ex.Message + "\nНачинаем новую игру.",
+                        "SlotlyWorld",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    StartNewGame();
+                }
+            }
+            else
+            {
+                StartNewGame();
+            }
+
+            DrawWorld();
+        }
+
+        private void StartNewGame()
+        {
             GenerateWorld();
 
             int startX = 0, startY = 0;
@@ -1126,7 +828,40 @@ namespace SlotlyWorld
 
             player.X = startX;
             player.Y = startY;
-            DrawWorld();
+        }
+
+        private void LoadGame()
+        {
+            var data = SaveSystem.Load();
+
+            player = data.Player;
+            world = data.World;
+            worldWidth = world.GetLength(0);
+            worldHeight = world.GetLength(1);
+            furnaces = data.Furnaces;
+            dayNightCycleTimer = data.DayNightCycleTimer;
+
+            exploredTiles = new bool[worldWidth, worldHeight];
+            miniMapScale = Math.Min(
+                (float)miniMapSize / worldWidth,
+                (float)miniMapSize / worldHeight);
+            GenerateMiniMapCache();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            gameTimer?.Stop();
+            base.OnFormClosing(e);
+
+            try
+            {
+                if (world != null && player != null)
+                    SaveSystem.Save(player, world, furnaces, dayNightCycleTimer);
+            }
+            catch
+            {
+                // Не блокируем закрытие, если сохранение упало.
+            }
         }
 
         // Генерация мира
@@ -1471,19 +1206,6 @@ namespace SlotlyWorld
         }
 
         private void OnKeyUp(object sender, KeyEventArgs e)
-        {
-            switch (e.KeyCode)
-            {
-                case Keys.W:
-                case Keys.S:
-                case Keys.A:
-                case Keys.D:
-                    player.SetDirection(e.KeyCode, false);
-                    break;
-            }
-        }
-
-        private void OneKeyUp(object sender, KeyEventArgs e)
         {
             switch (e.KeyCode)
             {
@@ -1919,6 +1641,12 @@ namespace SlotlyWorld
         // Игровая логика
         private void GameUpdate(object sender, EventArgs e)
         {
+            // Реальный deltaTime в секундах. Ограничиваем сверху, чтобы после фриза
+            // не получить гигантский скачок симуляции.
+            float deltaTime = (float)frameStopwatch.Elapsed.TotalSeconds;
+            frameStopwatch.Restart();
+            if (deltaTime > 0.1f) deltaTime = 0.1f;
+
             // Проверяем расстояние до текущей печи
             if (currentFurnace != null)
             {
@@ -1934,14 +1662,11 @@ namespace SlotlyWorld
                 }
             }
 
-            // Обновляем цикл дня и ночи (deltaTime примерно 0.001f при Interval = 1)
-            UpdateDayNightCycle(0.001f);
-            // Обновляем печи
-            UpdateFurnaces(0.001f); // deltaTime примерно 0.001f при Interval = 1
-            UpdateHealthRegeneration(0.001f); // deltaTime примерно 0.001f при Interval = 1
-            // Обновляем спавн мобов
-            UpdateMobSpawning(0.001f);
-            UpdateBlockBreaking(0.001f);
+            UpdateDayNightCycle(deltaTime);
+            UpdateFurnaces(deltaTime);
+            UpdateHealthRegeneration(deltaTime);
+            UpdateMobSpawning(deltaTime);
+            UpdateBlockBreaking(deltaTime);
             player.CalculateMovement(out float dx, out float dy);
 
             if (dx != 0 || dy != 0)
@@ -1978,8 +1703,7 @@ namespace SlotlyWorld
                 }
             }
 
-            // Обновляем мобов
-            UpdateMobs();
+            UpdateMobs(deltaTime);
 
             DrawWorld();
         }
@@ -2087,19 +1811,16 @@ namespace SlotlyWorld
             Console.WriteLine("Не удалось создать моба");
         }
 
-        private void UpdateMobs()
+        private void UpdateMobs(float deltaTime)
         {
-            // Удаляем мертвых мобов
             mobs.RemoveAll(m => m.Health <= 0);
 
-            // Обновляем живых мобов
             foreach (var mob in mobs)
             {
                 if (mob.IsActive)
                 {
-                    mob.Update(player, world, tileSize, 0.001f); // deltaTime примерно 0.001f при Interval = 1
+                    mob.Update(player, world, tileSize, deltaTime);
 
-                    // Проверяем столкновение с игроком
                     if (CheckCollision(mob, player))
                     {
                         if (mob.CanAttack)
@@ -2322,9 +2043,9 @@ namespace SlotlyWorld
             fractionalY = (playerTileY - viewHeight / 2) - viewOffsetY;
 
 
-            Bitmap bmp = new Bitmap(picWorld.Width, picWorld.Height);
-            using (Graphics g = Graphics.FromImage(bmp))
-
+            EnsureWorldBitmap();
+            Graphics g = worldGraphics;
+            g.Clear(Color.Black);
             {
                 // 1. Отрисовываем мир с учетом времени суток
                 for (int x = -1; x <= viewWidth; x++)
@@ -2507,11 +2228,14 @@ namespace SlotlyWorld
                 Color playerColor = ApplyLightLevel(Color.Blue, currentLightLevel, playerCenterX, playerCenterY);
 
                 // Отрисовка игрока
-                g.FillEllipse(new SolidBrush(playerColor),
-                             (int)Math.Round(playerScreenX),
-                             (int)Math.Round(playerScreenY),
-                             player.Size,
-                             player.Size);
+                using (var playerBrush = new SolidBrush(playerColor))
+                {
+                    g.FillEllipse(playerBrush,
+                                 (int)Math.Round(playerScreenX),
+                                 (int)Math.Round(playerScreenY),
+                                 player.Size,
+                                 player.Size);
+                }
 
                 // Эффект свечения от факела
                 if (player.HasTorch && currentCycle != DayNightCycle.Day)
@@ -2614,42 +2338,33 @@ namespace SlotlyWorld
                 }
 
                 string torchStatus = player.HasTorch ? "Факел: активен" : "Факел: неактивен";
+                string toolName = player.CurrentTool.HasValue
+                    ? GetItemName(player.CurrentTool.Value)
+                    : "Руки";
 
-                using (Font font = new Font("Arial", 12, FontStyle.Bold))
-                using (Brush textBrush = new SolidBrush(Color.White))
-                using (Brush bgBrush = new SolidBrush(Color.FromArgb(128, 0, 0, 0)))
-                {
-                    // Фон для текста
-                    g.FillRectangle(bgBrush, 10, 10, 200, 50);
-
-                    // Текст времени суток
-                    g.DrawString($"Время: {timeOfDay}", font, textBrush, 15, 15);
-
-                    // Текст статуса факела
-                    g.DrawString(torchStatus, font, textBrush, 15, 35);
-                }
-                using (Font font = new Font("Arial", 12, FontStyle.Bold))
-                using (Brush textBrush = new SolidBrush(Color.White))
-                using (Brush bgBrush = new SolidBrush(Color.FromArgb(128, 0, 0, 0)))
-                {
-                    // Фон для текста
-                    g.FillRectangle(bgBrush, 10, 10, 200, 70); // Увеличиваем высоту для нового текста
-
-                    // Текст времени суток
-                    g.DrawString($"Время: {timeOfDay}", font, textBrush, 15, 15);
-
-                    // Текст статуса факела
-                    g.DrawString(torchStatus, font, textBrush, 15, 35);
-
-                    // Текст текущего инструмента
-                    string toolName = player.CurrentTool.HasValue ?
-                        GetItemName(player.CurrentTool.Value) : "Руки";
-                    g.DrawString($"Инструмент: {toolName}", font, textBrush, 15, 55);
-                }
+                g.FillRectangle(hudBgBrush, 10, 10, 200, 70);
+                g.DrawString($"Время: {timeOfDay}", hudFont, hudTextBrush, 15, 15);
+                g.DrawString(torchStatus, hudFont, hudTextBrush, 15, 35);
+                g.DrawString($"Инструмент: {toolName}", hudFont, hudTextBrush, 15, 55);
             }
 
             UpdateMiniMap();
-            picWorld.Image = bmp;
+            picWorld.Invalidate();
+        }
+
+        private void EnsureWorldBitmap()
+        {
+            int w = Math.Max(1, picWorld.Width);
+            int h = Math.Max(1, picWorld.Height);
+
+            if (worldBitmap == null || worldBitmap.Width != w || worldBitmap.Height != h)
+            {
+                worldGraphics?.Dispose();
+                worldBitmap?.Dispose();
+                worldBitmap = new Bitmap(w, h);
+                worldGraphics = Graphics.FromImage(worldBitmap);
+                picWorld.Image = worldBitmap;
+            }
         }
 
 
